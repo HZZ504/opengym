@@ -116,6 +116,14 @@ def send_telegram_message(chat_id: str, text: str, buttons: Optional[list] = Non
         raise HTTPException(status_code=500, detail=f"Telegram send failed: {resp.text}")
 
 
+def answer_callback(callback_id: str, text: str):
+    token = config["telegram"]["bot_token"]
+    if not token or not callback_id:
+        return
+    url = f"https://api.telegram.org/bot{token}/answerCallbackQuery"
+    requests.post(url, data={"callback_query_id": callback_id, "text": text, "show_alert": False})
+
+
 def build_message(slot: Dict[str, Any], time_str: str) -> str:
     return (
         f"⏰ {time_str} 训练提醒（{slot['name']}）\n"
@@ -162,6 +170,11 @@ def update_task_status(task_id: str, status: str):
             "INSERT INTO events (task_id, user_id, event_type, created_at, meta) VALUES (?, ?, ?, ?, ?)",
             (task_id, None, status, now, None),
         )
+
+
+def log_event(msg: str):
+    with open(os.path.join(BASE_DIR, "events.log"), "a", encoding="utf-8") as f:
+        f.write(f"{datetime.now(TZ).isoformat()} {msg}\n")
 
 
 def send_reminder_for_user(user: Dict[str, Any], time_str: str, slot_id: str):
@@ -255,21 +268,31 @@ async def webhook(request: Request):
     data = await request.json()
     if "callback_query" in data:
         cb = data["callback_query"]
+        cb_id = cb.get("id")
         cb_data = cb.get("data", "")
         if ":" not in cb_data:
             return {"ok": True}
         action, task_id = cb_data.split(":", 1)
 
+        chat_id = str(cb["message"]["chat"]["id"])
+        log_event(f"callback action={action} task_id={task_id} chat_id={chat_id} cb_id={cb_id}")
+
         if action == "done":
             update_task_status(task_id, "done")
+            answer_callback(cb_id, "已记录：完成 ✅")
+            send_telegram_message(chat_id, "已记录：完成 ✅")
         elif action == "skip":
             update_task_status(task_id, "skip")
+            answer_callback(cb_id, "已记录：跳过 ⏭️")
+            send_telegram_message(chat_id, "已记录：跳过 ⏭️")
         elif action == "snooze10":
             update_task_status(task_id, "snoozed")
+            answer_callback(cb_id, "已延后10分钟 🕒")
+            send_telegram_message(chat_id, "已延后10分钟 🕒")
             # Create new task 10 minutes later
             snooze_minutes = config["reminders"]["snooze_minutes"]
             for user in config["telegram"]["users"]:
-                if str(user["chat_id"]) == str(cb["message"]["chat"]["id"]):
+                if str(user["chat_id"]) == chat_id:
                     now = datetime.now(TZ) + timedelta(minutes=snooze_minutes)
                     time_str = now.strftime("%H:%M")
                     # Reuse original slot
@@ -277,7 +300,7 @@ async def webhook(request: Request):
                         row = conn.execute("SELECT slot_id FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
                     if row:
                         send_reminder_for_user(user, time_str, row["slot_id"])
-            
+
         return {"ok": True}
 
     return {"ok": True}
