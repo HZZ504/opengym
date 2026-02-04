@@ -135,7 +135,9 @@ def send_telegram_message(chat_id: str, text: str, buttons: Optional[list] = Non
         resp = requests.post(url, data=payload)
 
     if not resp.ok:
-        raise HTTPException(status_code=500, detail=f"Telegram send failed: {resp.text}")
+        log_event(f"telegram_send_failed {resp.text}")
+        return False
+    return True
 
 
 def answer_callback(callback_id: str, text: str):
@@ -870,15 +872,15 @@ async def webhook(request: Request):
             if action == "done":
                 update_task_status(task_id, "done")
                 answer_callback(cb_id, "已记录：完成 ✅")
-                send_telegram_message(chat_id, "已记录：完成 ✅")
+                send_telegram_message(chat_id, "已记录：完成 ✅", parse_mode=None)
             elif action == "skip":
                 update_task_status(task_id, "skip")
                 answer_callback(cb_id, "已记录：跳过 ⏭️")
-                send_telegram_message(chat_id, "已记录：跳过 ⏭️")
+                send_telegram_message(chat_id, "已记录：跳过 ⏭️", parse_mode=None)
             elif action == "snooze10":
                 update_task_status(task_id, "snoozed")
                 answer_callback(cb_id, "已延后10分钟 🕒")
-                send_telegram_message(chat_id, "已延后10分钟 🕒")
+                send_telegram_message(chat_id, "已延后10分钟 🕒", parse_mode=None)
                 # Create new task 10 minutes later
                 snooze_minutes = config["reminders"]["snooze_minutes"]
                 for user in config["telegram"]["users"]:
