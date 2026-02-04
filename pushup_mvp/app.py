@@ -98,7 +98,10 @@ def send_telegram_message(chat_id: str, text: str, buttons: Optional[list] = Non
         if image.startswith("http://") or image.startswith("https://"):
             payload["photo"] = image
         else:
-            files = {"photo": open(image, "rb")}
+            image_path = image
+            if not os.path.isabs(image_path):
+                image_path = os.path.join(BASE_DIR, image_path)
+            files = {"photo": open(image_path, "rb")}
         resp = requests.post(url, data=payload, files=files)
     else:
         url = f"https://api.telegram.org/bot{token}/sendMessage"
