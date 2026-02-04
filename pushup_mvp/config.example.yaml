@@ -1,0 +1,100 @@
+timezone: "Asia/Shanghai"
+telegram:
+  bot_token: "<TELEGRAM_BOT_TOKEN>"
+  users:
+    - chat_id: 123456789
+      name: "Hanzhi"
+
+reminders:
+  times: ["10:40", "11:40", "14:00", "16:30", "19:10"]
+  timeout_minutes: 60
+  snooze_minutes: 10
+
+weekly_report:
+  day_of_week: "mon"
+  time: "10:25"
+
+slots:
+  chest:
+    - id: A1
+      name: "胸-外侧宽距"
+      color: green
+      exercise: "标准支架俯卧撑"
+      reps: "10-15 x1"
+      image: "<CHEST_A1_IMAGE_URL_OR_PATH>"
+    - id: A2
+      name: "胸-中部慢速"
+      color: green
+      exercise: "慢速俯卧撑（下3秒）"
+      reps: "8-12 x1"
+      image: "<CHEST_A2_IMAGE_URL_OR_PATH>"
+    - id: A3
+      name: "胸-下沿/顶峰收缩"
+      color: green
+      exercise: "顶峰停1秒俯卧撑"
+      reps: "8-12 x1"
+      image: "<CHEST_A3_IMAGE_URL_OR_PATH>"
+  shoulder:
+    - id: B1
+      name: "肩-上宽位"
+      color: red
+      exercise: "偏肩俯卧撑"
+      reps: "8-12 x1"
+      image: "<SHOULDER_B1_IMAGE_URL_OR_PATH>"
+    - id: B2
+      name: "肩-斜向位（稳定）"
+      color: red
+      exercise: "慢速偏肩俯卧撑（下3秒）"
+      reps: "6-10 x1"
+      image: "<SHOULDER_B2_IMAGE_URL_OR_PATH>"
+    - id: B3
+      name: "肩-内收位（肩+手臂）"
+      color: red
+      exercise: "肩手混合俯卧撑（肘更贴身）"
+      reps: "8-12 x1"
+      image: "<SHOULDER_B3_IMAGE_URL_OR_PATH>"
+  triceps:
+    - id: C1
+      name: "手臂-窄距"
+      color: gray
+      exercise: "窄距俯卧撑（肘贴身）"
+      reps: "8-12 x1"
+      image: "<TRICEPS_C1_IMAGE_URL_OR_PATH>"
+    - id: C2
+      name: "手臂-快泵"
+      color: gray
+      exercise: "小幅快泵"
+      reps: "15-25 x1"
+      image: "<TRICEPS_C2_IMAGE_URL_OR_PATH>"
+
+rotation:
+  mon:
+    "10:40": A1
+    "11:40": B2
+    "14:00": C1
+    "16:30": A2
+    "19:10": B1
+  tue:
+    "10:40": B1
+    "11:40": A2
+    "14:00": C2
+    "16:30": B3
+    "19:10": A3
+  wed:
+    "10:40": B2
+    "11:40": A1
+    "14:00": C1
+    "16:30": B2
+    "19:10": A2
+  thu:
+    "10:40": A3
+    "11:40": B1
+    "14:00": C2
+    "16:30": A1
+    "19:10": B3
+  fri:
+    "10:40": A2
+    "11:40": B2
+    "14:00": C1
+    "16:30": A1
+    "19:10": B2
