@@ -65,6 +65,22 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                user_id TEXT NOT NULL,
+                date TEXT NOT NULL,
+                total_tasks INTEGER NOT NULL,
+                done INTEGER NOT NULL,
+                skipped INTEGER NOT NULL,
+                timeout INTEGER NOT NULL,
+                snoozed INTEGER NOT NULL,
+                pending INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, date)
+            )
+            """
+        )
 
 
 def slot_index(slots: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -339,6 +355,7 @@ def create_task(user_id: str, time_str: str, slot_id: str) -> str:
 def update_task_status(task_id: str, status: str):
     now = int(datetime.now(TZ).timestamp())
     with db_connect() as conn:
+        row = conn.execute("SELECT user_id, date FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
         conn.execute(
             "UPDATE tasks SET status = ?, clicked_at = ? WHERE task_id = ?",
             (status, now, task_id),
@@ -347,6 +364,8 @@ def update_task_status(task_id: str, status: str):
             "INSERT INTO events (task_id, user_id, event_type, created_at, meta) VALUES (?, ?, ?, ?, ?)",
             (task_id, None, status, now, None),
         )
+    if row:
+        recompute_daily_stats(row["user_id"], row["date"])
 
 
 def upsert_task(user_id: str, date_str: str, time_str: str, slot_id: str, status: str):
@@ -361,17 +380,56 @@ def upsert_task(user_id: str, date_str: str, time_str: str, slot_id: str, status
                 "UPDATE tasks SET status=?, clicked_at=? WHERE task_id=?",
                 (status, now, row["task_id"]),
             )
-            return row["task_id"]
-        task_id = str(uuid.uuid4())
-        timeout_at = int((datetime.now(TZ) + timedelta(minutes=config["reminders"]["timeout_minutes"])).timestamp())
+            task_id = row["task_id"]
+        else:
+            task_id = str(uuid.uuid4())
+            timeout_at = int((datetime.now(TZ) + timedelta(minutes=config["reminders"]["timeout_minutes"])).timestamp())
+            conn.execute(
+                """
+                INSERT INTO tasks (task_id, user_id, date, time, slot_id, status, created_at, timeout_at, clicked_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (task_id, str(user_id), date_str, time_str, slot_id, status, now, timeout_at, now),
+            )
+    recompute_daily_stats(str(user_id), date_str)
+    return task_id
+
+
+def recompute_daily_stats(user_id: str, date_str: str):
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT status, COUNT(*) as cnt FROM tasks WHERE user_id=? AND date=? GROUP BY status",
+            (str(user_id), date_str),
+        ).fetchall()
+    counts = {r["status"]: r["cnt"] for r in rows}
+    total = sum(counts.values())
+    now = int(datetime.now(TZ).timestamp())
+    with db_connect() as conn:
         conn.execute(
             """
-            INSERT INTO tasks (task_id, user_id, date, time, slot_id, status, created_at, timeout_at, clicked_at)
+            INSERT INTO daily_stats (user_id, date, total_tasks, done, skipped, timeout, snoozed, pending, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, date) DO UPDATE SET
+              total_tasks=excluded.total_tasks,
+              done=excluded.done,
+              skipped=excluded.skipped,
+              timeout=excluded.timeout,
+              snoozed=excluded.snoozed,
+              pending=excluded.pending,
+              updated_at=excluded.updated_at
             """,
-            (task_id, str(user_id), date_str, time_str, slot_id, status, now, timeout_at, now),
+            (
+                str(user_id),
+                date_str,
+                total,
+                counts.get("done", 0),
+                counts.get("skip", 0),
+                counts.get("timeout", 0),
+                counts.get("snoozed", 0),
+                counts.get("pending", 0),
+                now,
+            ),
         )
-        return task_id
 
 
 def log_event(msg: str):
@@ -418,7 +476,7 @@ def timeout_scan():
     now = int(datetime.now(TZ).timestamp())
     with db_connect() as conn:
         rows = conn.execute(
-            "SELECT task_id FROM tasks WHERE status = 'pending' AND timeout_at <= ?",
+            "SELECT task_id, user_id, date FROM tasks WHERE status = 'pending' AND timeout_at <= ?",
             (now,),
         ).fetchall()
         for row in rows:
@@ -426,6 +484,7 @@ def timeout_scan():
                 "UPDATE tasks SET status = 'timeout', clicked_at = ? WHERE task_id = ?",
                 (now, row["task_id"]),
             )
+            recompute_daily_stats(row["user_id"], row["date"])
 
 
 def weekly_report_json(user_id: str, start_date, end_date) -> Dict[str, Any]:
