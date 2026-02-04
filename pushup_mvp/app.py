@@ -591,7 +591,43 @@ def weekly_report_json(user_id: str, start_date, end_date) -> Dict[str, Any]:
 
 def weekly_report_text(user_id: str, start_date, end_date) -> str:
     report = weekly_report_json(user_id, start_date, end_date)
-    return json.dumps(report, ensure_ascii=False, indent=2)
+
+    week_range = f"{report['period']['start_date']} ~ {report['period']['end_date']}"
+    user_name = report['user']['display_name']
+    total_tasks = report['summary']['total_tasks']
+    done_count = report['summary']['done']
+    skip_count = report['summary']['skipped']
+    timeout_count = report['summary']['timeout']
+    done_rate = int(report['summary']['done_rate'] * 100)
+    streak_days = report['summary']['streak_days']
+
+    slot_map = {r['time_slot']: r for r in report['by_time_slot']}
+    def slot_line(t):
+        r = slot_map.get(t, {"done": 0, "total_tasks": 0})
+        return f"- {t}：完成 {r['done']}/{r['total_tasks']}"
+
+    suggestion_text = report['suggestion']['text']
+
+    text = (
+        f"📊 上周训练周报（{week_range}）\n"
+        f"👤 用户：{user_name}\n"
+        f"📅 统计：周一～周五（共 {total_tasks} 次提醒）\n"
+        f"✅ 完成：{done_count}\n"
+        f"⏭️ 跳过：{skip_count}\n"
+        f"⏰ 超时未做：{timeout_count}\n"
+        f"📈 完成率：{done_rate}%\n"
+        f"🔥 连续打卡：{streak_days} 天\n\n"
+        f"🧩 时间段表现\n"
+        f"{slot_line('10:40')}\n"
+        f"{slot_line('11:40')}\n"
+        f"{slot_line('14:00')}\n"
+        f"{slot_line('16:30')}\n"
+        f"{slot_line('19:10')}\n\n"
+        f"🎯 下周建议（MVP）\n"
+        f"{suggestion_text}\n\n"
+        f"继续加油！本周从 10:40 第一条开始打卡💪"
+    )
+    return text
 
 
 def weekly_report():
