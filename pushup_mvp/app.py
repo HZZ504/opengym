@@ -134,6 +134,78 @@ def build_message(slot: Dict[str, Any], time_str: str) -> str:
     )
 
 
+def calendar_buttons():
+    return [[
+        {"text": "📅 今天", "callback_data": "cal:today"},
+        {"text": "📅 本周", "callback_data": "cal:week"},
+        {"text": "📅 本月", "callback_data": "cal:month"},
+    ]]
+
+
+def format_plan(user_id: str, mode: str) -> str:
+    now = datetime.now(TZ)
+    if mode == "today":
+        start = now.date()
+        end = now.date()
+        title = "🌤️ 今日训练计划"
+    elif mode == "week":
+        start = (now - timedelta(days=now.weekday())).date()
+        end = start + timedelta(days=6)
+        title = "🗓️ 本周训练计划"
+    else:
+        start = now.replace(day=1).date()
+        if start.month == 12:
+            end = start.replace(year=start.year + 1, month=1, day=1) - timedelta(days=1)
+        else:
+            end = start.replace(month=start.month + 1, day=1) - timedelta(days=1)
+        title = "🗓️ 本月训练计划"
+
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT date, time, slot_id, status
+            FROM tasks
+            WHERE user_id = ? AND date BETWEEN ? AND ?
+            ORDER BY date ASC, time ASC
+            """,
+            (str(user_id), start.isoformat(), end.isoformat()),
+        ).fetchall()
+
+    lines = [title, "", "🎯 计划总览（含完成情况）"]
+    if not rows:
+        lines.append("（暂无记录）")
+        return "\n".join(lines)
+
+    def status_icon(s: str) -> str:
+        return {"done": "✅", "skip": "⏭️", "timeout": "⏳", "snoozed": "🕒", "pending": "▫️"}.get(s, "▫️")
+
+    for r in rows:
+        slot = SLOT_INDEX.get(r["slot_id"], {"name": r["slot_id"]})
+        lines.append(f"{status_icon(r['status'])} {r['date']} {r['time']} · {slot['name']}")
+
+    # summary
+    counts = {}
+    for r in rows:
+        counts[r["status"]] = counts.get(r["status"], 0) + 1
+    total = len(rows)
+    done = counts.get("done", 0)
+    skip = counts.get("skip", 0)
+    timeout = counts.get("timeout", 0)
+    snoozed = counts.get("snoozed", 0)
+    pending = counts.get("pending", 0)
+    rate = f"{(done/total*100):.0f}%" if total else "0%"
+
+    lines += [
+        "",
+        "—" * 18,
+        f"完成率：{rate}",
+        f"完成 {done} / 跳过 {skip} / 超时 {timeout} / 延后 {snoozed} / 待完成 {pending}",
+        "—" * 18,
+    ]
+
+    return "\n".join(lines)
+
+
 def create_task(user_id: str, time_str: str, slot_id: str) -> str:
     now = datetime.now(TZ)
     task_id = str(uuid.uuid4())
@@ -277,6 +349,12 @@ async def webhook(request: Request):
         chat_id = str(cb["message"]["chat"]["id"])
         log_event(f"callback action={action} task_id={task_id} chat_id={chat_id} cb_id={cb_id}")
 
+        if action == "cal":
+            plan_text = format_plan(chat_id, task_id)
+            answer_callback(cb_id, "已生成计划 📅")
+            send_telegram_message(chat_id, plan_text)
+            return {"ok": True}
+
         if action == "done":
             update_task_status(task_id, "done")
             answer_callback(cb_id, "已记录：完成 ✅")
@@ -302,6 +380,13 @@ async def webhook(request: Request):
                         send_reminder_for_user(user, time_str, row["slot_id"])
 
         return {"ok": True}
+
+    if "message" in data:
+        text = (data.get("message", {}).get("text") or "").strip().lower()
+        chat_id = str(data.get("message", {}).get("chat", {}).get("id"))
+        if text in ["/calendar", "calendar", "日历", "计划"]:
+            send_telegram_message(chat_id, "📅 请选择查看范围：", buttons=calendar_buttons())
+            return {"ok": True}
 
     return {"ok": True}
 
