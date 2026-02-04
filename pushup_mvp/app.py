@@ -78,7 +78,7 @@ def slot_index(slots: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 SLOT_INDEX = slot_index(config["slots"])
 
 
-def send_telegram_message(chat_id: str, text: str, buttons: Optional[list] = None, image: Optional[str] = None):
+def send_telegram_message(chat_id: str, text: str, buttons: Optional[list] = None, image: Optional[str] = None, parse_mode: Optional[str] = "HTML"):
     token = config["telegram"]["bot_token"]
     if not token:
         raise RuntimeError("Missing Telegram bot_token in config.yaml")
@@ -90,8 +90,9 @@ def send_telegram_message(chat_id: str, text: str, buttons: Optional[list] = Non
         payload = {
             "chat_id": chat_id,
             "caption": text,
-            "parse_mode": "HTML",
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = json.dumps(reply_markup)
         files = None
@@ -108,9 +109,10 @@ def send_telegram_message(chat_id: str, text: str, buttons: Optional[list] = Non
         payload = {
             "chat_id": chat_id,
             "text": text,
-            "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         if reply_markup:
             payload["reply_markup"] = json.dumps(reply_markup)
         resp = requests.post(url, data=payload)
@@ -649,7 +651,7 @@ def weekly_report():
 
     for user in config["telegram"]["users"]:
         text = weekly_report_text(user["chat_id"], start, end)
-        send_telegram_message(chat_id=user["chat_id"], text=text)
+        send_telegram_message(chat_id=user["chat_id"], text=text, parse_mode=None)
 
 
 @app.post("/webhook")
