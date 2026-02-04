@@ -145,6 +145,16 @@ def calendar_buttons():
     ]]
 
 
+def main_menu_keyboard():
+    return {
+        "keyboard": [
+            [{"text": "📌 今日计划"}, {"text": "🗓️ 工作日完整计划"}],
+        ],
+        "resize_keyboard": True,
+        "one_time_keyboard": False,
+    }
+
+
 def format_plan(user_id: str, mode: str) -> str:
     now = datetime.now(TZ)
     if mode == "today":
@@ -163,34 +173,52 @@ def format_plan(user_id: str, mode: str) -> str:
             end = start.replace(month=start.month + 1, day=1) - timedelta(days=1)
         title = "🗓️ 本月训练计划"
 
+    return format_range_plan(user_id, start, end, title)
+
+
+def format_range_plan(user_id: str, start_date, end_date, title: str) -> str:
+    rotation = config["rotation"]
+    times = config["reminders"]["times"]
+    weekday_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri"}
+
+    plan = []
+    d = start_date
+    while d <= end_date:
+        wk = weekday_map.get(d.weekday())
+        if wk in rotation:
+            for t in times:
+                slot_id = rotation[wk].get(t)
+                if slot_id:
+                    plan.append((d.isoformat(), t, slot_id))
+        d = d + timedelta(days=1)
+
     with db_connect() as conn:
         rows = conn.execute(
             """
             SELECT date, time, slot_id, status
             FROM tasks
             WHERE user_id = ? AND date BETWEEN ? AND ?
-            ORDER BY date ASC, time ASC
             """,
-            (str(user_id), start.isoformat(), end.isoformat()),
+            (str(user_id), start_date.isoformat(), end_date.isoformat()),
         ).fetchall()
+    status_map = {(r["date"], r["time"], r["slot_id"]): r["status"] for r in rows}
 
     lines = [title, "", "🎯 计划总览（含完成情况）"]
-    if not rows:
-        lines.append("（暂无记录）")
+    if not plan:
+        lines.append("（暂无计划）")
         return "\n".join(lines)
 
     def status_icon(s: str) -> str:
-        return {"done": "✅", "skip": "⏭️", "timeout": "⏳", "snoozed": "🕒", "pending": "▫️"}.get(s, "▫️")
+        return {"done": "✅", "skip": "⏭️", "timeout": "⏳", "snoozed": "🕒", "pending": "▫️", None: "▫️"}.get(s, "▫️")
 
-    for r in rows:
-        slot = SLOT_INDEX.get(r["slot_id"], {"name": r["slot_id"]})
-        lines.append(f"{status_icon(r['status'])} {r['date']} {r['time']} · {slot['name']}")
+    counts = {"done": 0, "skip": 0, "timeout": 0, "snoozed": 0, "pending": 0}
+    for date_str, time_str, slot_id in plan:
+        status = status_map.get((date_str, time_str, slot_id), "pending")
+        counts[status] = counts.get(status, 0) + 1
+        slot = SLOT_INDEX.get(slot_id, {"name": slot_id})
+        lines.append(f"{status_icon(status)} {date_str} {time_str} · {slot['name']}")
 
-    # summary
-    counts = {}
-    for r in rows:
-        counts[r["status"]] = counts.get(r["status"], 0) + 1
-    total = len(rows)
+    total = len(plan)
     done = counts.get("done", 0)
     skip = counts.get("skip", 0)
     timeout = counts.get("timeout", 0)
@@ -207,6 +235,51 @@ def format_plan(user_id: str, mode: str) -> str:
     ]
 
     return "\n".join(lines)
+
+
+def format_weekday_plan() -> str:
+    rotation = config["rotation"]
+    times = config["reminders"]["times"]
+    order = ["mon", "tue", "wed", "thu", "fri"]
+    names = {"mon": "周一", "tue": "周二", "wed": "周三", "thu": "周四", "fri": "周五"}
+    lines = ["🗓️ 工作日完整计划", ""]
+    for wk in order:
+        if wk not in rotation:
+            continue
+        line = [names[wk]]
+        for t in times:
+            line.append(rotation[wk].get(t, "-"))
+        lines.append(" / ".join(line))
+    lines += ["", "说明：C1/C2 已映射为背部 D1/D2（按固定表显示 D1/D2）"]
+    return "\n".join(lines)
+
+
+def today_plan_message(user_id: str):
+    now = datetime.now(TZ)
+    title = "🌤️ 今日训练计划（可修改状态）"
+    return format_range_plan(user_id, now.date(), now.date(), title)
+
+
+def today_plan_buttons(user_id: str):
+    now = datetime.now(TZ).date()
+    rotation = config["rotation"]
+    times = config["reminders"]["times"]
+    weekday_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri"}
+    wk = weekday_map.get(now.weekday())
+    if wk not in rotation:
+        return None
+    buttons = []
+    for t in times:
+        slot_id = rotation[wk].get(t)
+        if not slot_id:
+            continue
+        base = f"set:{now.isoformat()}|{t}|{slot_id}|"
+        buttons.append([
+            {"text": f"✅ {t}", "callback_data": base + "done"},
+            {"text": f"⏭️ {t}", "callback_data": base + "skip"},
+            {"text": f"▫️ {t}", "callback_data": base + "pending"},
+        ])
+    return buttons
 
 
 def create_task(user_id: str, time_str: str, slot_id: str) -> str:
@@ -245,6 +318,31 @@ def update_task_status(task_id: str, status: str):
             "INSERT INTO events (task_id, user_id, event_type, created_at, meta) VALUES (?, ?, ?, ?, ?)",
             (task_id, None, status, now, None),
         )
+
+
+def upsert_task(user_id: str, date_str: str, time_str: str, slot_id: str, status: str):
+    now = int(datetime.now(TZ).timestamp())
+    with db_connect() as conn:
+        row = conn.execute(
+            "SELECT task_id FROM tasks WHERE user_id=? AND date=? AND time=? AND slot_id=?",
+            (str(user_id), date_str, time_str, slot_id),
+        ).fetchone()
+        if row:
+            conn.execute(
+                "UPDATE tasks SET status=?, clicked_at=? WHERE task_id=?",
+                (status, now, row["task_id"]),
+            )
+            return row["task_id"]
+        task_id = str(uuid.uuid4())
+        timeout_at = int((datetime.now(TZ) + timedelta(minutes=config["reminders"]["timeout_minutes"])).timestamp())
+        conn.execute(
+            """
+            INSERT INTO tasks (task_id, user_id, date, time, slot_id, status, created_at, timeout_at, clicked_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (task_id, str(user_id), date_str, time_str, slot_id, status, now, timeout_at, now),
+        )
+        return task_id
 
 
 def log_event(msg: str):
@@ -358,6 +456,16 @@ async def webhook(request: Request):
             send_telegram_message(chat_id, plan_text)
             return {"ok": True}
 
+        if action == "set":
+            # set:YYYY-MM-DD|HH:MM|SLOT|status
+            try:
+                date_str, time_str, slot_id, status = task_id.split("|", 3)
+                upsert_task(chat_id, date_str, time_str, slot_id, status)
+                answer_callback(cb_id, f"已更新：{status}")
+            except Exception:
+                answer_callback(cb_id, "更新失败")
+            return {"ok": True}
+
         if action == "done":
             update_task_status(task_id, "done")
             answer_callback(cb_id, "已记录：完成 ✅")
@@ -389,6 +497,28 @@ async def webhook(request: Request):
         chat_id = str(data.get("message", {}).get("chat", {}).get("id"))
         if text in ["/calendar", "calendar", "日历", "计划"]:
             send_telegram_message(chat_id, "📅 请选择查看范围：", buttons=calendar_buttons())
+            return {"ok": True}
+        if text in ["/start", "start", "菜单", "帮助"]:
+            send_telegram_message(chat_id, "📍 请选择功能：", buttons=None, image=None)
+            # set reply keyboard
+            token = config["telegram"]["bot_token"]
+            requests.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                data={
+                    "chat_id": chat_id,
+                    "text": "📌 功能菜单已开启",
+                    "reply_markup": json.dumps(main_menu_keyboard()),
+                },
+            )
+            return {"ok": True}
+        if text == "📌 今日计划":
+            send_telegram_message(chat_id, today_plan_message(chat_id))
+            buttons = today_plan_buttons(chat_id)
+            if buttons:
+                send_telegram_message(chat_id, "点击下方按钮修改完成状态：", buttons=buttons)
+            return {"ok": True}
+        if text == "🗓️ 工作日完整计划":
+            send_telegram_message(chat_id, format_weekday_plan())
             return {"ok": True}
 
     return {"ok": True}
