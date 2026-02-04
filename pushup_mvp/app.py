@@ -426,8 +426,7 @@ def timeout_scan():
             )
 
 
-def weekly_report_text(user_id: str, start_date, end_date) -> str:
-    # planned tasks in the week
+def weekly_report_json(user_id: str, start_date, end_date) -> Dict[str, Any]:
     rotation = config["rotation"]
     times = config["reminders"]["times"]
     weekday_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri"}
@@ -446,18 +445,40 @@ def weekly_report_text(user_id: str, start_date, end_date) -> str:
     with db_connect() as conn:
         rows = conn.execute(
             """
-            SELECT date, time, slot_id, status
+            SELECT task_id, date, time, slot_id, status, created_at, timeout_at, clicked_at
             FROM tasks
             WHERE user_id = ? AND date BETWEEN ? AND ?
             """,
             (str(user_id), start_date.isoformat(), end_date.isoformat()),
         ).fetchall()
+
     status_map = {(r["date"], r["time"], r["slot_id"]): r["status"] for r in rows}
 
     counts = {"done": 0, "skip": 0, "timeout": 0, "snoozed": 0, "pending": 0}
+    by_day = {}
+    by_slot = {}
+
     for date_str, time_str, slot_id in plan:
         status = status_map.get((date_str, time_str, slot_id), "pending")
         counts[status] = counts.get(status, 0) + 1
+
+        by_day.setdefault(date_str, {"total_tasks": 0, "done": 0, "skipped": 0, "timeout": 0})
+        by_day[date_str]["total_tasks"] += 1
+        if status == "done":
+            by_day[date_str]["done"] += 1
+        elif status == "skip":
+            by_day[date_str]["skipped"] += 1
+        elif status == "timeout":
+            by_day[date_str]["timeout"] += 1
+
+        by_slot.setdefault(time_str, {"total_tasks": 0, "done": 0, "skipped": 0, "timeout": 0})
+        by_slot[time_str]["total_tasks"] += 1
+        if status == "done":
+            by_slot[time_str]["done"] += 1
+        elif status == "skip":
+            by_slot[time_str]["skipped"] += 1
+        elif status == "timeout":
+            by_slot[time_str]["timeout"] += 1
 
     total = len(plan)
     done = counts.get("done", 0)
@@ -465,20 +486,112 @@ def weekly_report_text(user_id: str, start_date, end_date) -> str:
     timeout = counts.get("timeout", 0)
     snoozed = counts.get("snoozed", 0)
     pending = counts.get("pending", 0)
-    completion_rate = f"{(done / total * 100):.0f}%" if total else "0%"
+    done_rate = round(done / total, 2) if total else 0.0
 
-    text = (
-        f"📊 本周训练周报\n"
-        f"区间：{start_date.isoformat()} ~ {end_date.isoformat()}\n\n"
-        f"完成率：{completion_rate}\n"
-        f"完成：{done}\n"
-        f"跳过：{skip}\n"
-        f"超时：{timeout}\n"
-        f"延后：{snoozed}\n"
-        f"待完成：{pending}\n"
-        f"总任务：{total}\n"
-    )
-    return text
+    # streak days (consecutive days with done > 0 in the period)
+    streak = 0
+    best_time_slot = None
+    worst_time_slot = None
+
+    # compute best/worst time slot
+    slot_rates = {}
+    for t, stats in by_slot.items():
+        if stats["total_tasks"]:
+            slot_rates[t] = stats["done"] / stats["total_tasks"]
+    if slot_rates:
+        best_time_slot = max(slot_rates, key=slot_rates.get)
+        worst_time_slot = min(slot_rates, key=slot_rates.get)
+
+    # streak: count consecutive days from end_date backwards with done>0
+    d = end_date
+    while d >= start_date:
+        day_stats = by_day.get(d.isoformat(), {})
+        if day_stats.get("done", 0) > 0:
+            streak += 1
+            d = d - timedelta(days=1)
+        else:
+            break
+
+    # tasks list
+    tasks = []
+    for r in rows:
+        def ts_to_iso(ts):
+            if ts is None:
+                return None
+            return datetime.fromtimestamp(ts, TZ).isoformat()
+        tasks.append({
+            "task_id": r["task_id"],
+            "date": r["date"],
+            "time_slot": r["time"],
+            "slot_id": r["slot_id"],
+            "status": r["status"],
+            "created_at": ts_to_iso(r["created_at"]),
+            "timeout_at": ts_to_iso(r["timeout_at"]),
+            "clicked_at": ts_to_iso(r["clicked_at"]),
+        })
+
+    # assemble json
+    week_id = f"{start_date.isocalendar().year}-W{start_date.isocalendar().week:02d}"
+
+    report = {
+        "report_type": "weekly_workout_report",
+        "version": "v0.1",
+        "generated_at": datetime.now(TZ).isoformat(),
+        "timezone": config.get("timezone", "UTC"),
+        "user": {
+            "user_id": f"tg:{user_id}",
+            "display_name": next((u["name"] for u in config["telegram"]["users"] if str(u["chat_id"]) == str(user_id)), "user"),
+        },
+        "period": {
+            "week_id": week_id,
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "workdays_only": True,
+        },
+        "schedule_config": {
+            "workout_times": times,
+            "timeout_minutes": config["reminders"]["timeout_minutes"],
+        },
+        "summary": {
+            "total_tasks": total,
+            "done": done,
+            "skipped": skip,
+            "timeout": timeout,
+            "done_rate": done_rate,
+            "streak_days": streak,
+        },
+        "by_day": [
+            {
+                "date": d,
+                "weekday": datetime.fromisoformat(d).weekday() + 1,
+                **stats
+            } for d, stats in sorted(by_day.items())
+        ],
+        "by_time_slot": [
+            {
+                "time_slot": t,
+                **stats,
+                "done_rate": round(stats["done"] / stats["total_tasks"], 2) if stats["total_tasks"] else 0.0,
+            } for t, stats in sorted(by_slot.items())
+        ],
+        "tasks": tasks,
+        "insights": {
+            "best_time_slot": best_time_slot or "",
+            "worst_time_slot": worst_time_slot or "",
+            "most_common_status": max(counts, key=counts.get) if total else "",
+        },
+        "suggestion": {
+            "level": "medium",
+            "text": "下周优先保证 10:40 和 16:30 两次（最能缓解久坐）。看到提醒先点“延后10分钟”，避免超时。",
+        },
+    }
+
+    return report
+
+
+def weekly_report_text(user_id: str, start_date, end_date) -> str:
+    report = weekly_report_json(user_id, start_date, end_date)
+    return json.dumps(report, ensure_ascii=False, indent=2)
 
 
 def weekly_report():
