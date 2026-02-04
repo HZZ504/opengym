@@ -533,6 +533,18 @@ def weekly_report_json(user_id: str, start_date, end_date) -> Dict[str, Any]:
     # assemble json
     week_id = f"{start_date.isocalendar().year}-W{start_date.isocalendar().week:02d}"
 
+    # suggestion logic
+    suggestion_text = ""
+    if done_rate >= 0.8:
+        suggestion_text = "A. 完成率 ≥ 80% 表现很稳！下周保持节奏即可。\n建议：把“最轻松的那次”加 2 次（或下放慢 3 秒）提升效果。"
+    elif done_rate >= 0.5:
+        suggestion_text = "B. 完成率 50%～79% 不错！下周目标：完成率冲到 80%。\n建议：优先保证 10:40 和 16:30 两次（最能缓解久坐）。"
+    else:
+        suggestion_text = "C. 完成率 < 50% 这周比较忙也没关系，下周先把习惯建立起来。\n建议：只要完成每天任意 2 次就算赢（优先 10:40 + 16:30）。"
+
+    if worst_time_slot:
+        suggestion_text += f"\nD. 你最容易错过的是 {worst_time_slot}。\n建议：看到提醒先点“延后10分钟”，别让它直接超时。"
+
     report = {
         "report_type": "weekly_workout_report",
         "version": "v0.1",
@@ -582,7 +594,7 @@ def weekly_report_json(user_id: str, start_date, end_date) -> Dict[str, Any]:
         },
         "suggestion": {
             "level": "medium",
-            "text": "下周优先保证 10:40 和 16:30 两次（最能缓解久坐）。看到提醒先点“延后10分钟”，避免超时。",
+            "text": suggestion_text,
         },
     }
 
