@@ -119,7 +119,7 @@ def slot_index(slots: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
 SLOT_INDEX = slot_index(config["slots"])
 
 
-def send_telegram_message(chat_id: str, text: str, buttons: Optional[list] = None, image: Optional[str] = None, parse_mode: Optional[str] = "HTML"):
+def send_telegram_message(chat_id: str, text: str, buttons: Optional[list] = None, image: Optional[str] = None, parse_mode: Optional[str] = None):
     token = config["telegram"]["bot_token"]
     if not token:
         raise RuntimeError("Missing Telegram bot_token in config.yaml")
