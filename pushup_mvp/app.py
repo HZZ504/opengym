@@ -644,6 +644,128 @@ def weekly_report_text(user_id: str, start_date, end_date) -> str:
     return text
 
 
+def weekly_progress_text(user_id: str) -> str:
+    now = datetime.now(TZ)
+    start = (now - timedelta(days=now.weekday())).date()
+    end = now.date()
+
+    rotation = config["rotation"]
+    times = config["reminders"]["times"]
+    weekday_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri"}
+
+    # planned tasks from Monday to today (workdays)
+    plan = []
+    d = start
+    while d <= end:
+        wk = weekday_map.get(d.weekday())
+        if wk in rotation:
+            for t in times:
+                slot_id = rotation[wk].get(t)
+                if slot_id:
+                    plan.append((d.isoformat(), t, slot_id))
+        d = d + timedelta(days=1)
+
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT date, time, slot_id, status
+            FROM tasks
+            WHERE user_id = ? AND date BETWEEN ? AND ?
+            """,
+            (str(user_id), start.isoformat(), end.isoformat()),
+        ).fetchall()
+    status_map = {(r["date"], r["time"], r["slot_id"]): r["status"] for r in rows}
+
+    counts = {"done": 0, "skip": 0, "timeout": 0, "snoozed": 0, "pending": 0}
+    by_slot = {t: {"total_tasks": 0, "done": 0, "skipped": 0, "timeout": 0} for t in times}
+    by_day = {}
+
+    for date_str, time_str, slot_id in plan:
+        status = status_map.get((date_str, time_str, slot_id), "pending")
+        counts[status] = counts.get(status, 0) + 1
+
+        by_day.setdefault(date_str, {"total_tasks": 0, "done": 0, "timeout": 0})
+        by_day[date_str]["total_tasks"] += 1
+        if status == "done":
+            by_day[date_str]["done"] += 1
+        if status == "timeout":
+            by_day[date_str]["timeout"] += 1
+
+        s = by_slot[time_str]
+        s["total_tasks"] += 1
+        if status == "done":
+            s["done"] += 1
+        elif status == "skip":
+            s["skipped"] += 1
+        elif status == "timeout":
+            s["timeout"] += 1
+
+    total = len(plan)
+    done = counts.get("done", 0)
+    skip = counts.get("skip", 0)
+    timeout = counts.get("timeout", 0)
+    done_rate = int((done / total * 100) if total else 0)
+
+    # days passed (workdays)
+    days_passed = len([d for d in by_day.keys()])
+
+    # today remaining list
+    today = now.date().isoformat()
+    remaining = []
+    wk = weekday_map.get(now.weekday())
+    if wk in rotation:
+        for t in times:
+            slot_id = rotation[wk].get(t)
+            status = status_map.get((today, t, slot_id), "pending")
+            if status in ["pending", "snoozed"]:
+                slot = SLOT_INDEX.get(slot_id, {"name": slot_id})
+                remaining.append(f"- {t} {slot['name']}")
+    today_remaining = "\n".join(remaining) if remaining else "今天已全部完成 ✅"
+
+    # progress bars per slot
+    def bar(done_count, total_count):
+        return "■" * done_count + "□" * max(total_count - done_count, 0)
+
+    slot_lines = []
+    for t in times:
+        s = by_slot[t]
+        slot_lines.append(f"- {t}：{s['done']}/{s['total_tasks']} {bar(s['done'], s['total_tasks'])}")
+
+    # progress tips
+    progress_tip = ""
+    if done_rate >= 80:
+        progress_tip = "A. 本周完成率 ≥ 80% 状态很稳！保持节奏就能轻松满勤🔥"
+    elif done_rate >= 50:
+        progress_tip = "B. 本周完成率 50%～79% 不错！建议优先保证 10:40 和 16:30 两次（最能缓解久坐）。"
+    else:
+        progress_tip = "C. 本周完成率 < 50% 这周先把习惯找回来：每天完成任意 2 次就算赢。"
+
+    # add tip for timeouts today
+    if by_day.get(today, {}).get("timeout", 0) >= 2:
+        progress_tip += "\nD. 今天有点忙也没关系，看到提醒先点“延后10分钟”保住节奏。"
+
+    weekly_goal_text = "完成 ≥ 20 次（80%）"
+
+    text = (
+        f"📍 本周训练进度（{start.isoformat()} ~ {end.isoformat()}）\n"
+        f"👤 用户：{next((u['name'] for u in config['telegram']['users'] if str(u['chat_id'])==str(user_id)), 'user')}\n"
+        f"📅 已进行：{days_passed}/5 天\n"
+        f"🎯 本周目标：{weekly_goal_text}\n\n"
+        f"📌 总进度\n"
+        f"✅ 完成：{done}\n"
+        f"⏭️ 跳过：{skip}\n"
+        f"⏰ 超时：{timeout}\n"
+        f"📈 完成率：{done_rate}%\n\n"
+        f"🧩 时间点完成情况\n"
+        + "\n".join(slot_lines)
+        + "\n\n"
+        f"🚀 今天剩余\n{today_remaining}\n\n"
+        f"💡 提示\n{progress_tip}"
+    )
+
+    return text
+
+
 def weekly_report():
     now = datetime.now(TZ)
     start = (now - timedelta(days=now.weekday()+7)).date()
@@ -753,6 +875,9 @@ async def webhook(request: Request):
             start = (now - timedelta(days=now.weekday()+7)).date()
             end = (start + timedelta(days=6))
             send_telegram_message(chat_id, weekly_report_text(chat_id, start, end))
+            return {"ok": True}
+        if text in ["/weekprogress", "weekprogress", "本周进度", "周进度"]:
+            send_telegram_message(chat_id, weekly_progress_text(chat_id))
             return {"ok": True}
         if text in ["/start", "start", "菜单", "帮助"]:
             send_telegram_message(chat_id, "📍 请选择功能：", buttons=None, image=None)
