@@ -2,6 +2,7 @@ import os
 import uuid
 import json
 import sqlite3
+import traceback
 from datetime import datetime, timedelta, time as dtime
 from typing import Dict, Any, Optional
 
@@ -837,131 +838,135 @@ def weekly_report():
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    data = await request.json()
-    if "callback_query" in data:
-        cb = data["callback_query"]
-        cb_id = cb.get("id")
-        cb_data = cb.get("data", "")
-        if ":" not in cb_data:
+    try:
+        data = await request.json()
+        if "callback_query" in data:
+            cb = data["callback_query"]
+            cb_id = cb.get("id")
+            cb_data = cb.get("data", "")
+            if ":" not in cb_data:
+                return {"ok": True}
+            action, task_id = cb_data.split(":", 1)
+
+            chat_id = str(cb["message"]["chat"]["id"])
+            log_event(f"callback action={action} task_id={task_id} chat_id={chat_id} cb_id={cb_id}")
+
+            if action == "cal":
+                plan_text = format_plan(chat_id, task_id)
+                answer_callback(cb_id, "已生成计划 📅")
+                send_telegram_message(chat_id, plan_text)
+                return {"ok": True}
+
+            if action == "set":
+                # set:YYYY-MM-DD|HH:MM|SLOT|status
+                try:
+                    date_str, time_str, slot_id, status = task_id.split("|", 3)
+                    upsert_task(chat_id, date_str, time_str, slot_id, status)
+                    answer_callback(cb_id, f"已更新：{status}")
+                except Exception:
+                    answer_callback(cb_id, "更新失败")
+                return {"ok": True}
+
+            if action == "done":
+                update_task_status(task_id, "done")
+                answer_callback(cb_id, "已记录：完成 ✅")
+                send_telegram_message(chat_id, "已记录：完成 ✅")
+            elif action == "skip":
+                update_task_status(task_id, "skip")
+                answer_callback(cb_id, "已记录：跳过 ⏭️")
+                send_telegram_message(chat_id, "已记录：跳过 ⏭️")
+            elif action == "snooze10":
+                update_task_status(task_id, "snoozed")
+                answer_callback(cb_id, "已延后10分钟 🕒")
+                send_telegram_message(chat_id, "已延后10分钟 🕒")
+                # Create new task 10 minutes later
+                snooze_minutes = config["reminders"]["snooze_minutes"]
+                for user in config["telegram"]["users"]:
+                    if str(user["chat_id"]) == chat_id:
+                        now = datetime.now(TZ) + timedelta(minutes=snooze_minutes)
+                        time_str = now.strftime("%H:%M")
+                        # Reuse original slot
+                        with db_connect() as conn:
+                            row = conn.execute("SELECT slot_id FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+                        if row:
+                            send_reminder_for_user(user, time_str, row["slot_id"])
+
             return {"ok": True}
-        action, task_id = cb_data.split(":", 1)
 
-        chat_id = str(cb["message"]["chat"]["id"])
-        log_event(f"callback action={action} task_id={task_id} chat_id={chat_id} cb_id={cb_id}")
-
-        if action == "cal":
-            plan_text = format_plan(chat_id, task_id)
-            answer_callback(cb_id, "已生成计划 📅")
-            send_telegram_message(chat_id, plan_text)
-            return {"ok": True}
-
-        if action == "set":
-            # set:YYYY-MM-DD|HH:MM|SLOT|status
-            try:
-                date_str, time_str, slot_id, status = task_id.split("|", 3)
-                upsert_task(chat_id, date_str, time_str, slot_id, status)
-                answer_callback(cb_id, f"已更新：{status}")
-            except Exception:
-                answer_callback(cb_id, "更新失败")
-            return {"ok": True}
-
-        if action == "done":
-            update_task_status(task_id, "done")
-            answer_callback(cb_id, "已记录：完成 ✅")
-            send_telegram_message(chat_id, "已记录：完成 ✅")
-        elif action == "skip":
-            update_task_status(task_id, "skip")
-            answer_callback(cb_id, "已记录：跳过 ⏭️")
-            send_telegram_message(chat_id, "已记录：跳过 ⏭️")
-        elif action == "snooze10":
-            update_task_status(task_id, "snoozed")
-            answer_callback(cb_id, "已延后10分钟 🕒")
-            send_telegram_message(chat_id, "已延后10分钟 🕒")
-            # Create new task 10 minutes later
-            snooze_minutes = config["reminders"]["snooze_minutes"]
-            for user in config["telegram"]["users"]:
-                if str(user["chat_id"]) == chat_id:
-                    now = datetime.now(TZ) + timedelta(minutes=snooze_minutes)
-                    time_str = now.strftime("%H:%M")
-                    # Reuse original slot
-                    with db_connect() as conn:
-                        row = conn.execute("SELECT slot_id FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
-                    if row:
-                        send_reminder_for_user(user, time_str, row["slot_id"])
+        if "message" in data:
+            text = (data.get("message", {}).get("text") or "").strip().lower()
+            chat_id = str(data.get("message", {}).get("chat", {}).get("id"))
+            if "@" in text and text.startswith("/"):
+                text = text.split("@", 1)[0]
+            if text in ["/calendar", "calendar", "日历", "计划"]:
+                send_telegram_message(chat_id, "📅 请选择查看范围：", buttons=calendar_buttons())
+                return {"ok": True}
+            if text in ["/next", "next", "下一个动作"]:
+                msg = next_action_message(chat_id)
+                # send with image if next slot exists
+                now = datetime.now(TZ)
+                rotation = config["rotation"]
+                times = config["reminders"]["times"]
+                weekday_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri"}
+                wk = weekday_map.get(now.weekday())
+                image = None
+                if wk in rotation:
+                    for t in times:
+                        hour, minute = map(int, t.split(":"))
+                        t_dt = datetime.combine(now.date(), dtime(hour, minute), tzinfo=TZ)
+                        if t_dt >= now:
+                            slot_id = rotation[wk].get(t)
+                            slot = SLOT_INDEX.get(slot_id)
+                            if slot:
+                                image = slot.get("image")
+                            break
+                send_telegram_message(chat_id, msg, image=image)
+                return {"ok": True}
+            if text in ["/today", "today", "今日计划"]:
+                send_telegram_message(chat_id, today_plan_message(chat_id))
+                buttons = today_plan_buttons(chat_id)
+                if buttons:
+                    send_telegram_message(chat_id, "点击下方按钮修改完成状态：", buttons=buttons)
+                return {"ok": True}
+            if text in ["/weekday", "weekday", "工作日完整计划"]:
+                send_telegram_message(chat_id, format_weekday_plan())
+                return {"ok": True}
+            if text in ["/weekreport", "weekreport", "周报"]:
+                now = datetime.now(TZ)
+                start = (now - timedelta(days=now.weekday()+7)).date()
+                end = (start + timedelta(days=6))
+                send_telegram_message(chat_id, weekly_report_text(chat_id, start, end))
+                return {"ok": True}
+            if text in ["/weekprogress", "weekprogress", "本周进度", "周进度"]:
+                send_telegram_message(chat_id, weekly_progress_text(chat_id))
+                return {"ok": True}
+            if text in ["/start", "start", "菜单", "帮助"]:
+                send_telegram_message(chat_id, "📍 请选择功能：", buttons=None, image=None)
+                # set reply keyboard
+                token = config["telegram"]["bot_token"]
+                requests.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    data={
+                        "chat_id": chat_id,
+                        "text": "📌 功能菜单已开启",
+                        "reply_markup": json.dumps(main_menu_keyboard()),
+                    },
+                )
+                return {"ok": True}
+            if text == "📌 今日计划":
+                send_telegram_message(chat_id, today_plan_message(chat_id))
+                buttons = today_plan_buttons(chat_id)
+                if buttons:
+                    send_telegram_message(chat_id, "点击下方按钮修改完成状态：", buttons=buttons)
+                return {"ok": True}
+            if text == "🗓️ 工作日完整计划":
+                send_telegram_message(chat_id, format_weekday_plan())
+                return {"ok": True}
 
         return {"ok": True}
-
-    if "message" in data:
-        text = (data.get("message", {}).get("text") or "").strip().lower()
-        chat_id = str(data.get("message", {}).get("chat", {}).get("id"))
-        if "@" in text and text.startswith("/"):
-            text = text.split("@", 1)[0]
-        if text in ["/calendar", "calendar", "日历", "计划"]:
-            send_telegram_message(chat_id, "📅 请选择查看范围：", buttons=calendar_buttons())
-            return {"ok": True}
-        if text in ["/next", "next", "下一个动作"]:
-            msg = next_action_message(chat_id)
-            # send with image if next slot exists
-            now = datetime.now(TZ)
-            rotation = config["rotation"]
-            times = config["reminders"]["times"]
-            weekday_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri"}
-            wk = weekday_map.get(now.weekday())
-            image = None
-            if wk in rotation:
-                for t in times:
-                    hour, minute = map(int, t.split(":"))
-                    t_dt = datetime.combine(now.date(), dtime(hour, minute), tzinfo=TZ)
-                    if t_dt >= now:
-                        slot_id = rotation[wk].get(t)
-                        slot = SLOT_INDEX.get(slot_id)
-                        if slot:
-                            image = slot.get("image")
-                        break
-            send_telegram_message(chat_id, msg, image=image)
-            return {"ok": True}
-        if text in ["/today", "today", "今日计划"]:
-            send_telegram_message(chat_id, today_plan_message(chat_id))
-            buttons = today_plan_buttons(chat_id)
-            if buttons:
-                send_telegram_message(chat_id, "点击下方按钮修改完成状态：", buttons=buttons)
-            return {"ok": True}
-        if text in ["/weekday", "weekday", "工作日完整计划"]:
-            send_telegram_message(chat_id, format_weekday_plan())
-            return {"ok": True}
-        if text in ["/weekreport", "weekreport", "周报"]:
-            now = datetime.now(TZ)
-            start = (now - timedelta(days=now.weekday()+7)).date()
-            end = (start + timedelta(days=6))
-            send_telegram_message(chat_id, weekly_report_text(chat_id, start, end))
-            return {"ok": True}
-        if text in ["/weekprogress", "weekprogress", "本周进度", "周进度"]:
-            send_telegram_message(chat_id, weekly_progress_text(chat_id))
-            return {"ok": True}
-        if text in ["/start", "start", "菜单", "帮助"]:
-            send_telegram_message(chat_id, "📍 请选择功能：", buttons=None, image=None)
-            # set reply keyboard
-            token = config["telegram"]["bot_token"]
-            requests.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                data={
-                    "chat_id": chat_id,
-                    "text": "📌 功能菜单已开启",
-                    "reply_markup": json.dumps(main_menu_keyboard()),
-                },
-            )
-            return {"ok": True}
-        if text == "📌 今日计划":
-            send_telegram_message(chat_id, today_plan_message(chat_id))
-            buttons = today_plan_buttons(chat_id)
-            if buttons:
-                send_telegram_message(chat_id, "点击下方按钮修改完成状态：", buttons=buttons)
-            return {"ok": True}
-        if text == "🗓️ 工作日完整计划":
-            send_telegram_message(chat_id, format_weekday_plan())
-            return {"ok": True}
-
-    return {"ok": True}
+    except Exception as e:
+        log_event(f"webhook_error {e}\n{traceback.format_exc()}")
+        return {"ok": True}
 
 
 @app.get("/health")
