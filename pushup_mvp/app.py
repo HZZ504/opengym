@@ -282,6 +282,27 @@ def today_plan_buttons(user_id: str):
     return buttons
 
 
+def next_action_message(user_id: str) -> str:
+    now = datetime.now(TZ)
+    rotation = config["rotation"]
+    times = config["reminders"]["times"]
+    weekday_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri"}
+    wk = weekday_map.get(now.weekday())
+    if wk not in rotation:
+        return "今天非工作日，没有计划动作。"
+
+    # find next time today
+    for t in times:
+        hour, minute = map(int, t.split(":"))
+        t_dt = datetime.combine(now.date(), dtime(hour, minute), tzinfo=TZ)
+        if t_dt >= now:
+            slot_id = rotation[wk].get(t)
+            slot = SLOT_INDEX.get(slot_id, {"name": slot_id})
+            return f"⏭️ 下一个动作\n时间：{t}\n动作：{slot['name']}"
+
+    return "今天的动作已完成。"
+
+
 def create_task(user_id: str, time_str: str, slot_id: str) -> str:
     now = datetime.now(TZ)
     task_id = str(uuid.uuid4())
@@ -495,8 +516,22 @@ async def webhook(request: Request):
     if "message" in data:
         text = (data.get("message", {}).get("text") or "").strip().lower()
         chat_id = str(data.get("message", {}).get("chat", {}).get("id"))
+        if "@" in text and text.startswith("/"):
+            text = text.split("@", 1)[0]
         if text in ["/calendar", "calendar", "日历", "计划"]:
             send_telegram_message(chat_id, "📅 请选择查看范围：", buttons=calendar_buttons())
+            return {"ok": True}
+        if text in ["/next", "next", "下一个动作"]:
+            send_telegram_message(chat_id, next_action_message(chat_id))
+            return {"ok": True}
+        if text in ["/today", "today", "今日计划"]:
+            send_telegram_message(chat_id, today_plan_message(chat_id))
+            buttons = today_plan_buttons(chat_id)
+            if buttons:
+                send_telegram_message(chat_id, "点击下方按钮修改完成状态：", buttons=buttons)
+            return {"ok": True}
+        if text in ["/weekday", "weekday", "工作日完整计划"]:
+            send_telegram_message(chat_id, format_weekday_plan())
             return {"ok": True}
         if text in ["/start", "start", "菜单", "帮助"]:
             send_telegram_message(chat_id, "📍 请选择功能：", buttons=None, image=None)
