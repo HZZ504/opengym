@@ -291,14 +291,20 @@ def next_action_message(user_id: str) -> str:
     if wk not in rotation:
         return "今天非工作日，没有计划动作。"
 
-    # find next time today
     for t in times:
         hour, minute = map(int, t.split(":"))
         t_dt = datetime.combine(now.date(), dtime(hour, minute), tzinfo=TZ)
         if t_dt >= now:
             slot_id = rotation[wk].get(t)
             slot = SLOT_INDEX.get(slot_id, {"name": slot_id})
-            return f"⏭️ 下一个动作\n时间：{t}\n动作：{slot['name']}"
+            cues = slot.get("cues", "核心收紧，背部中立，动作稳定。")
+            return (
+                f"⏭️ 下一个动作\n"
+                f"时间：{t}\n"
+                f"动作：{slot['exercise']}（{slot['name']}）\n"
+                f"目标：{slot['reps']}\n"
+                f"提示：{cues}"
+            )
 
     return "今天的动作已完成。"
 
@@ -522,7 +528,25 @@ async def webhook(request: Request):
             send_telegram_message(chat_id, "📅 请选择查看范围：", buttons=calendar_buttons())
             return {"ok": True}
         if text in ["/next", "next", "下一个动作"]:
-            send_telegram_message(chat_id, next_action_message(chat_id))
+            msg = next_action_message(chat_id)
+            # send with image if next slot exists
+            now = datetime.now(TZ)
+            rotation = config["rotation"]
+            times = config["reminders"]["times"]
+            weekday_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri"}
+            wk = weekday_map.get(now.weekday())
+            image = None
+            if wk in rotation:
+                for t in times:
+                    hour, minute = map(int, t.split(":"))
+                    t_dt = datetime.combine(now.date(), dtime(hour, minute), tzinfo=TZ)
+                    if t_dt >= now:
+                        slot_id = rotation[wk].get(t)
+                        slot = SLOT_INDEX.get(slot_id)
+                        if slot:
+                            image = slot.get("image")
+                        break
+            send_telegram_message(chat_id, msg, image=image)
             return {"ok": True}
         if text in ["/today", "today", "今日计划"]:
             send_telegram_message(chat_id, today_plan_message(chat_id))
