@@ -426,40 +426,68 @@ def timeout_scan():
             )
 
 
+def weekly_report_text(user_id: str, start_date, end_date) -> str:
+    # planned tasks in the week
+    rotation = config["rotation"]
+    times = config["reminders"]["times"]
+    weekday_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri"}
+
+    plan = []
+    d = start_date
+    while d <= end_date:
+        wk = weekday_map.get(d.weekday())
+        if wk in rotation:
+            for t in times:
+                slot_id = rotation[wk].get(t)
+                if slot_id:
+                    plan.append((d.isoformat(), t, slot_id))
+        d = d + timedelta(days=1)
+
+    with db_connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT date, time, slot_id, status
+            FROM tasks
+            WHERE user_id = ? AND date BETWEEN ? AND ?
+            """,
+            (str(user_id), start_date.isoformat(), end_date.isoformat()),
+        ).fetchall()
+    status_map = {(r["date"], r["time"], r["slot_id"]): r["status"] for r in rows}
+
+    counts = {"done": 0, "skip": 0, "timeout": 0, "snoozed": 0, "pending": 0}
+    for date_str, time_str, slot_id in plan:
+        status = status_map.get((date_str, time_str, slot_id), "pending")
+        counts[status] = counts.get(status, 0) + 1
+
+    total = len(plan)
+    done = counts.get("done", 0)
+    skip = counts.get("skip", 0)
+    timeout = counts.get("timeout", 0)
+    snoozed = counts.get("snoozed", 0)
+    pending = counts.get("pending", 0)
+    completion_rate = f"{(done / total * 100):.0f}%" if total else "0%"
+
+    text = (
+        f"📊 本周训练周报\n"
+        f"区间：{start_date.isoformat()} ~ {end_date.isoformat()}\n\n"
+        f"完成率：{completion_rate}\n"
+        f"完成：{done}\n"
+        f"跳过：{skip}\n"
+        f"超时：{timeout}\n"
+        f"延后：{snoozed}\n"
+        f"待完成：{pending}\n"
+        f"总任务：{total}\n"
+    )
+    return text
+
+
 def weekly_report():
     now = datetime.now(TZ)
-    start = (now - timedelta(days=7)).date().isoformat()
-    end = now.date().isoformat()
+    start = (now - timedelta(days=now.weekday()+7)).date()
+    end = (start + timedelta(days=6))
 
     for user in config["telegram"]["users"]:
-        with db_connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT status, COUNT(*) as cnt
-                FROM tasks
-                WHERE user_id = ? AND date BETWEEN ? AND ?
-                GROUP BY status
-                """,
-                (str(user["chat_id"]), start, end),
-            ).fetchall()
-
-        counts = {r["status"]: r["cnt"] for r in rows}
-        total = sum(counts.values())
-        done = counts.get("done", 0)
-        skip = counts.get("skip", 0)
-        timeout = counts.get("timeout", 0)
-        snoozed = counts.get("snoozed", 0)
-        completion_rate = f"{(done / total * 100):.0f}%" if total else "0%"
-
-        text = (
-            f"📊 本周训练周报\n"
-            f"完成率：{completion_rate}\n"
-            f"完成：{done}\n"
-            f"跳过：{skip}\n"
-            f"超时：{timeout}\n"
-            f"延后：{snoozed}\n"
-            f"总任务：{total}\n"
-        )
+        text = weekly_report_text(user["chat_id"], start, end)
         send_telegram_message(chat_id=user["chat_id"], text=text)
 
 
@@ -556,6 +584,12 @@ async def webhook(request: Request):
             return {"ok": True}
         if text in ["/weekday", "weekday", "工作日完整计划"]:
             send_telegram_message(chat_id, format_weekday_plan())
+            return {"ok": True}
+        if text in ["/weekreport", "weekreport", "周报"]:
+            now = datetime.now(TZ)
+            start = (now - timedelta(days=now.weekday()+7)).date()
+            end = (start + timedelta(days=6))
+            send_telegram_message(chat_id, weekly_report_text(chat_id, start, end))
             return {"ok": True}
         if text in ["/start", "start", "菜单", "帮助"]:
             send_telegram_message(chat_id, "📍 请选择功能：", buttons=None, image=None)
