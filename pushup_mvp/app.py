@@ -82,6 +82,30 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                chat_id TEXT PRIMARY KEY,
+                display_name TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+
+    # seed users from config if table empty
+    try:
+        with db_connect() as conn:
+            count = conn.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+            if count == 0 and config.get("telegram", {}).get("users"):
+                now = int(datetime.now(TZ).timestamp())
+                for u in config["telegram"]["users"]:
+                    conn.execute(
+                        "INSERT OR IGNORE INTO users (chat_id, display_name, created_at, updated_at) VALUES (?, ?, ?, ?)",
+                        (str(u["chat_id"]), u.get("name", "user"), now, now),
+                    )
+    except Exception:
+        pass
 
 
 def slot_index(slots: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
@@ -435,6 +459,35 @@ def recompute_daily_stats(user_id: str, date_str: str):
         )
 
 
+def upsert_user(chat_id: str, display_name: str):
+    now = int(datetime.now(TZ).timestamp())
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO users (chat_id, display_name, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+              display_name=excluded.display_name,
+              updated_at=excluded.updated_at
+            """,
+            (str(chat_id), display_name, now, now),
+        )
+
+
+def get_users():
+    with db_connect() as conn:
+        rows = conn.execute("SELECT chat_id, display_name FROM users").fetchall()
+    return [{"chat_id": r["chat_id"], "name": r["display_name"]} for r in rows]
+
+
+def get_user(chat_id: str) -> Optional[Dict[str, Any]]:
+    with db_connect() as conn:
+        row = conn.execute("SELECT chat_id, display_name FROM users WHERE chat_id=?", (str(chat_id),)).fetchone()
+    if row:
+        return {"chat_id": row["chat_id"], "name": row["display_name"]}
+    return None
+
+
 def log_event(msg: str):
     with open(os.path.join(BASE_DIR, "events.log"), "a", encoding="utf-8") as f:
         f.write(f"{datetime.now(TZ).isoformat()} {msg}\n")
@@ -471,7 +524,7 @@ def schedule_daily_reminders(scheduler: BackgroundScheduler):
 
 
 def send_reminders_batch(time_str: str, slot_id: str):
-    for user in config["telegram"]["users"]:
+    for user in get_users():
         send_reminder_for_user(user, time_str, slot_id)
 
 
@@ -616,7 +669,7 @@ def weekly_report_json(user_id: str, start_date, end_date) -> Dict[str, Any]:
         "timezone": config.get("timezone", "UTC"),
         "user": {
             "user_id": f"tg:{user_id}",
-            "display_name": next((u["name"] for u in config["telegram"]["users"] if str(u["chat_id"]) == str(user_id)), "user"),
+            "display_name": (get_user(user_id) or {}).get("name", "user"),
         },
         "period": {
             "week_id": week_id,
@@ -833,7 +886,7 @@ def weekly_report():
     start = (now - timedelta(days=now.weekday()+7)).date()
     end = (start + timedelta(days=6))
 
-    for user in config["telegram"]["users"]:
+    for user in get_users():
         text = weekly_report_text(user["chat_id"], start, end)
         send_telegram_message(chat_id=user["chat_id"], text=text, parse_mode=None)
 
@@ -851,6 +904,8 @@ async def webhook(request: Request):
             action, task_id = cb_data.split(":", 1)
 
             chat_id = str(cb["message"]["chat"]["id"])
+            display_name = cb.get("from", {}).get("first_name") or cb.get("from", {}).get("username") or "user"
+            upsert_user(chat_id, display_name)
             log_event(f"callback action={action} task_id={task_id} chat_id={chat_id} cb_id={cb_id}")
 
             if action == "cal":
@@ -883,21 +938,22 @@ async def webhook(request: Request):
                 send_telegram_message(chat_id, "已延后10分钟 🕒", parse_mode=None)
                 # Create new task 10 minutes later
                 snooze_minutes = config["reminders"]["snooze_minutes"]
-                for user in config["telegram"]["users"]:
-                    if str(user["chat_id"]) == chat_id:
-                        now = datetime.now(TZ) + timedelta(minutes=snooze_minutes)
-                        time_str = now.strftime("%H:%M")
-                        # Reuse original slot
-                        with db_connect() as conn:
-                            row = conn.execute("SELECT slot_id FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
-                        if row:
-                            send_reminder_for_user(user, time_str, row["slot_id"])
+                user = get_user(chat_id) or {"chat_id": chat_id, "name": "user"}
+                now = datetime.now(TZ) + timedelta(minutes=snooze_minutes)
+                time_str = now.strftime("%H:%M")
+                # Reuse original slot
+                with db_connect() as conn:
+                    row = conn.execute("SELECT slot_id FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+                if row:
+                    send_reminder_for_user(user, time_str, row["slot_id"])
 
             return {"ok": True}
 
         if "message" in data:
             text = (data.get("message", {}).get("text") or "").strip().lower()
             chat_id = str(data.get("message", {}).get("chat", {}).get("id"))
+            display_name = data.get("message", {}).get("chat", {}).get("first_name") or data.get("message", {}).get("from", {}).get("first_name") or data.get("message", {}).get("from", {}).get("username") or "user"
+            upsert_user(chat_id, display_name)
             if "@" in text and text.startswith("/"):
                 text = text.split("@", 1)[0]
             if text in ["/calendar", "calendar", "日历", "计划"]:
