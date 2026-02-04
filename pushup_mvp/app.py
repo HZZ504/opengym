@@ -937,10 +937,10 @@ async def webhook(request: Request):
                 now = datetime.now(TZ)
                 start = (now - timedelta(days=now.weekday()+7)).date()
                 end = (start + timedelta(days=6))
-                send_telegram_message(chat_id, weekly_report_text(chat_id, start, end))
+                send_telegram_message(chat_id, weekly_report_text(chat_id, start, end), parse_mode=None)
                 return {"ok": True}
             if text in ["/weekprogress", "weekprogress", "本周进度", "周进度"]:
-                send_telegram_message(chat_id, weekly_progress_text(chat_id))
+                send_telegram_message(chat_id, weekly_progress_text(chat_id), parse_mode=None)
                 return {"ok": True}
             if text in ["/start", "start", "菜单", "帮助"]:
                 send_telegram_message(chat_id, "📍 请选择功能：", buttons=None, image=None)
